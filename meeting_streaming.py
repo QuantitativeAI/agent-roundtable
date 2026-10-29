@@ -64,7 +64,7 @@ class StreamingMeeting:
         await self._emit({"type": "round_start", "round": 0, "title": t(topic, "Moderator 开场", "Moderator Opening")})
         await self._emit({"type": "agent_start", "agent": "Moderator", "role": t(topic, "仲裁者", "Arbiter"), "round": 0})
 
-        expert_specs = _build_expert_specs(self.experts)
+        expert_specs = _build_expert_specs(self.experts, topic)
         opening_text = await self.moderator.opening(
             topic=topic,
             expert_specs=expert_specs,
@@ -83,7 +83,7 @@ class StreamingMeeting:
         })
 
         # Try to extract topic-specific expert titles from the opening and retitle agents
-        _retitle_experts_from_opening(self.experts, opening_text)
+        _retitle_experts_from_opening(self.experts, opening_text, topic)
 
         # === Round 1 ===
         self._check_cancel()
@@ -97,7 +97,7 @@ class StreamingMeeting:
         self.messages.extend(round1_messages)
 
         self._check_cancel()
-        r1_formatted = _format_messages(round1_messages)
+        r1_formatted = _format_messages(round1_messages, topic)
         summary1 = await self._run_moderator_summary(1, topic, r1_formatted)
         self.summaries.append(summary1)
 
@@ -117,7 +117,7 @@ class StreamingMeeting:
         self.messages.extend(round2_messages)
 
         self._check_cancel()
-        r2_formatted = _format_messages(round2_messages)
+        r2_formatted = _format_messages(round2_messages, topic)
         summary2 = await self._run_moderator_summary(2, topic, r2_formatted, summary1.raw_text)
         self.summaries.append(summary2)
 
@@ -132,13 +132,13 @@ class StreamingMeeting:
                 topic=topic,
                 round2_summary=r2_formatted,
                 moderator_summary=summary2.raw_text,
-                attacks_on_me=_extract_attacks_on_agent(round2_messages, expert.name),
+                attacks_on_me=_extract_attacks_on_agent(round2_messages, expert.name, topic),
             ),
         )
         self.messages.extend(round3_messages)
 
         self._check_cancel()
-        r3_formatted = _format_messages(round3_messages)
+        r3_formatted = _format_messages(round3_messages, topic)
         summary3 = await self._run_moderator_summary(3, topic, r3_formatted, summary2.raw_text)
         self.summaries.append(summary3)
 
@@ -148,7 +148,7 @@ class StreamingMeeting:
             await self._emit({"type": "round_start", "round": 4, "title": t(topic, "第四轮：关键未解问题补充", "Round 4: Supplementary on Key Unresolved Issues")})
 
             focused_issues = summary3.next_step
-            compressed = _build_compressed_summary(self.summaries)
+            compressed = _build_compressed_summary(self.summaries, topic)
 
             round4_messages = await self._run_expert_round(
                 round_num=4,
@@ -162,7 +162,7 @@ class StreamingMeeting:
             self.messages.extend(round4_messages)
 
             self._check_cancel()
-            r4_formatted = _format_messages(round4_messages)
+            r4_formatted = _format_messages(round4_messages, topic)
             summary4 = await self._run_moderator_summary(4, topic, r4_formatted, summary3.raw_text)
             self.summaries.append(summary4)
         else:
@@ -300,7 +300,7 @@ class StreamingMeeting:
             round_idx = summary.round_index
             round_msgs = [m for m in self.messages if m.round_index == round_idx]
             parts.append(f"\n## {_t(f'第{round_idx}轮发言', f'Round {round_idx} Statements')}")
-            parts.append(_format_messages(round_msgs))
+            parts.append(_format_messages(round_msgs, topic))
             parts.append(f"\n## {_t(f'第{round_idx}轮 Moderator 总结', f'Round {round_idx} Moderator Summary')}")
             parts.append(summary.raw_text)
         return "\n\n".join(parts)
@@ -328,3 +328,4 @@ class StreamingMeeting:
         for s in report.final_scores:
             lines.append(f"- **{s.agent_name}**: {s.contribution_score}/10 — {s.summary}")
         return "\n".join(lines)
+

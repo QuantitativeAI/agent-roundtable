@@ -8,20 +8,21 @@ from typing import List
 
 from models import MeetingInput, AgentMessage, RoundSummary, FinalReport
 from agents import ModeratorAgent, ExpertAgent
+from i18n import t
 
 logger = logging.getLogger(__name__)
 
 
-def _format_messages(messages: List[AgentMessage]) -> str:
+def _format_messages(messages: List[AgentMessage], topic: str = "") -> str:
     """Format a list of AgentMessages into a readable summary string."""
     parts = []
     for msg in messages:
         content_str = json.dumps(msg.content, ensure_ascii=False, indent=2) if msg.content else msg.raw_text
-        parts.append(f"【{msg.agent_name}】:\n{content_str}")
+        parts.append(t(topic, f"【{msg.agent_name}】:\n{content_str}", f"[{msg.agent_name}]:\n{content_str}"))
     return "\n\n".join(parts)
 
 
-def _extract_attacks_on_agent(messages: List[AgentMessage], agent_name: str) -> str:
+def _extract_attacks_on_agent(messages: List[AgentMessage], agent_name: str, topic: str = "") -> str:
     """Extract all attacks directed at a specific agent from round 2 messages."""
     attacks = []
     for msg in messages:
@@ -30,31 +31,40 @@ def _extract_attacks_on_agent(messages: List[AgentMessage], agent_name: str) -> 
         for attack in msg.content.get("attacks", []):
             if isinstance(attack, dict) and attack.get("target_agent") == agent_name:
                 attacks.append(
-                    f"{msg.agent_name} 攻击了你的观点 \"{attack.get('target_point', '')}\"，"
-                    f"理由：{attack.get('weakness', '')}"
+                    t(
+                        topic,
+                        f"{msg.agent_name} 攻击了你的观点 \"{attack.get('target_point', '')}\"，"
+                        f"理由：{attack.get('weakness', '')}",
+                        f"{msg.agent_name} attacked your point \"{attack.get('target_point', '')}\", "
+                        f"reasoning: {attack.get('weakness', '')}",
+                    )
                 )
-    return "\n".join(attacks) if attacks else "本轮没有人直接攻击你的观点。"
+    return "\n".join(attacks) if attacks else t(
+        topic, "本轮没有人直接攻击你的观点。", "No one attacked your points directly this round."
+    )
 
 
-def _build_compressed_summary(summaries: List[RoundSummary]) -> str:
+def _build_compressed_summary(summaries: List[RoundSummary], topic: str = "") -> str:
     """Build a compressed summary of all previous rounds for Round 4 context."""
     parts = []
     for s in summaries:
-        ideas = "; ".join(s.new_valuable_ideas) if s.new_valuable_ideas else "无"
-        critiques = "; ".join(s.strong_critiques) if s.strong_critiques else "无"
-        preserved = "; ".join(s.points_worth_preserving) if s.points_worth_preserving else "无"
+        none_str = t(topic, "无", "None")
+        ideas = "; ".join(s.new_valuable_ideas) if s.new_valuable_ideas else none_str
+        critiques = "; ".join(s.strong_critiques) if s.strong_critiques else none_str
+        preserved = "; ".join(s.points_worth_preserving) if s.points_worth_preserving else none_str
         parts.append(
-            f"第{s.round_index}轮 —— "
-            f"新观点: {ideas} | "
-            f"关键攻击: {critiques} | "
-            f"值得保留: {preserved}"
+            t(
+                topic,
+                f"第{s.round_index}轮 —— 新观点: {ideas} | 关键攻击: {critiques} | 值得保留: {preserved}",
+                f"Round {s.round_index} — New ideas: {ideas} | Key critiques: {critiques} | Worth preserving: {preserved}",
+            )
         )
     return "\n".join(parts)
 
 
-def _build_expert_specs(experts: List[ExpertAgent]) -> str:
+def _build_expert_specs(experts: List[ExpertAgent], topic: str = "") -> str:
     """Build moderator-facing expert specs for opening role assignment."""
-    return "\n".join(f"- {expert.opening_assignment_label}" for expert in experts)
+    return "\n".join(f"- {expert.opening_assignment_label(topic)}" for expert in experts)
 
 
 def _clean_expert_title(raw_title: str) -> str:
@@ -64,7 +74,7 @@ def _clean_expert_title(raw_title: str) -> str:
     return title
 
 
-def _retitle_experts_from_opening(experts: List[ExpertAgent], opening_text: str) -> dict[str, str]:
+def _retitle_experts_from_opening(experts: List[ExpertAgent], opening_text: str, topic: str = "") -> dict[str, str]:
     """Extract topic-specific expert titles from the moderator opening."""
     retitled: dict[str, str] = {}
     for expert in experts:
@@ -87,7 +97,7 @@ def _retitle_experts_from_opening(experts: List[ExpertAgent], opening_text: str)
                 break
         if new_title and new_title != expert.name:
             old_name = expert.name
-            expert.retitle(new_title)
+            expert.retitle(new_title, topic)
             retitled[old_name] = new_title
     if retitled:
         logger.info("Expert title mapping: %s", retitled)
@@ -118,7 +128,7 @@ class RoundtableMeeting:
         logger.info("=== Roundtable Meeting Start: %s ===", topic)
 
         # Round 0: Moderator opening
-        expert_specs = _build_expert_specs(self.experts)
+        expert_specs = _build_expert_specs(self.experts, topic)
         opening_text = await self.moderator.opening(
             topic=topic,
             expert_specs=expert_specs,
@@ -127,7 +137,7 @@ class RoundtableMeeting:
             background=meeting_input.background,
         )
         logger.info("Moderator opening:\n%s", opening_text)
-        _retitle_experts_from_opening(self.experts, opening_text)
+        _retitle_experts_from_opening(self.experts, opening_text, topic)
 
         # Round 1: Independent initial opinions
         logger.info("=== Round 1: Independent Opinions ===")
@@ -141,7 +151,7 @@ class RoundtableMeeting:
             logger.info("[Round 1] %s: %s", msg.agent_name, msg.raw_text[:200])
 
         # Moderator summary + score for Round 1
-        r1_formatted = _format_messages(round1_messages)
+        r1_formatted = _format_messages(round1_messages, topic)
         summary1 = await self.moderator.summarize_and_score(
             round_index=1,
             topic=topic,
@@ -166,7 +176,7 @@ class RoundtableMeeting:
             logger.info("[Round 2] %s: %s", msg.agent_name, msg.raw_text[:200])
 
         # Moderator summary + score for Round 2
-        r2_formatted = _format_messages(round2_messages)
+        r2_formatted = _format_messages(round2_messages, topic)
         summary2 = await self.moderator.summarize_and_score(
             round_index=2,
             topic=topic,
@@ -183,7 +193,7 @@ class RoundtableMeeting:
                 topic=topic,
                 round2_summary=r2_formatted,
                 moderator_summary=summary2.raw_text,
-                attacks_on_me=_extract_attacks_on_agent(round2_messages, expert.name),
+                attacks_on_me=_extract_attacks_on_agent(round2_messages, expert.name, topic),
             )
             for expert in self.experts
         ]
@@ -193,7 +203,7 @@ class RoundtableMeeting:
             logger.info("[Round 3] %s: %s", msg.agent_name, msg.raw_text[:200])
 
         # Moderator summary + score for Round 3
-        r3_formatted = _format_messages(round3_messages)
+        r3_formatted = _format_messages(round3_messages, topic)
         summary3 = await self.moderator.summarize_and_score(
             round_index=3,
             topic=topic,
@@ -207,7 +217,7 @@ class RoundtableMeeting:
         if summary3.should_continue and self.max_rounds >= 4:
             logger.info("=== Round 4: Focused Supplement ===")
             focused_issues = summary3.next_step
-            compressed = _build_compressed_summary(self.summaries)
+            compressed = _build_compressed_summary(self.summaries, topic)
 
             round4_tasks = [
                 expert.speak_round4(
@@ -222,7 +232,7 @@ class RoundtableMeeting:
             for msg in round4_messages:
                 logger.info("[Round 4] %s: %s", msg.agent_name, msg.raw_text[:200])
 
-            r4_formatted = _format_messages(round4_messages)
+            r4_formatted = _format_messages(round4_messages, topic)
             summary4 = await self.moderator.summarize_and_score(
                 round_index=4,
                 topic=topic,
@@ -235,23 +245,24 @@ class RoundtableMeeting:
 
         # Final report
         logger.info("=== Generating Final Report ===")
-        all_discussion = self._build_full_discussion(opening_text)
+        all_discussion = self._build_full_discussion(opening_text, topic)
         final_report = await self.moderator.finalize(
             topic=topic, all_discussion=all_discussion
         )
         logger.info("Final report generated.")
         return final_report
 
-    def _build_full_discussion(self, opening_text: str) -> str:
+    def _build_full_discussion(self, opening_text: str, topic: str = "") -> str:
         """Build the full discussion text for the final report."""
-        parts = [f"## Moderator 开场\n{opening_text}"]
+        parts = [t(topic, f"## Moderator 开场\n{opening_text}", f"## Moderator Opening\n{opening_text}")]
 
         for summary in self.summaries:
             round_idx = summary.round_index
             round_msgs = self._round_messages(round_idx)
-            parts.append(f"\n## 第{round_idx}轮发言")
-            parts.append(_format_messages(round_msgs))
-            parts.append(f"\n## 第{round_idx}轮 Moderator 总结")
+            parts.append(t(topic, f"\n## 第{round_idx}轮发言", f"\n## Round {round_idx} Statements"))
+            parts.append(_format_messages(round_msgs, topic))
+            parts.append(t(topic, f"\n## 第{round_idx}轮 Moderator 总结", f"\n## Round {round_idx} Moderator Summary"))
             parts.append(summary.raw_text)
 
         return "\n\n".join(parts)
+

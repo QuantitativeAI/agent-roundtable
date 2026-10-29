@@ -10,6 +10,16 @@ def is_chinese(text: str) -> bool:
     return any("\u4e00" <= c <= "\u9fff" for c in text)
 
 
+def lang_of(text: str) -> str:
+    """Return 'zh' if *text* looks Chinese, otherwise 'en'."""
+    return "zh" if is_chinese(text) else "en"
+
+
+def pick(lang: str, zh: str, en: str) -> str:
+    """Pick *zh* or *en* from an already-resolved language tag (see lang_of)."""
+    return zh if lang == "zh" else en
+
+
 # ---------------------------------------------------------------------------
 # Instruction appended to every LLM prompt so the model follows topic language
 # ---------------------------------------------------------------------------
@@ -51,3 +61,4 @@ def get_default_experts(topic: str) -> list[dict]:
 def t(topic: str, zh: str, en: str) -> str:
     """Pick *zh* or *en* based on whether *topic* looks Chinese."""
     return zh if is_chinese(topic) else en
+

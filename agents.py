@@ -10,24 +10,9 @@ from openai import AsyncOpenAI
 from config import LLMProviderConfig
 from models import AgentMessage, RoundScore, RoundSummary, FinalReport, FinalScore
 from parser import parse_json_response, safe_parse_agent_output
-from i18n import LANG_FOLLOW_INSTRUCTION
-from skills.web_search import (
-    SEARCH_DUPLICATE_PROMPT,
-    SEARCH_ERROR_PROMPT,
-    SEARCH_FINAL_ONLY_PROMPT,
-    SEARCH_KEYWORD_FIRST_PROMPT,
-    SEARCH_REFINE_PROMPT,
-    SKILL_PROMPT as SEARCH_SKILL_PROMPT,
-)
-from prompts import (
-    MODERATOR_OPENING_PROMPT,
-    MODERATOR_SUMMARY_PROMPT,
-    MODERATOR_FINAL_PROMPT,
-    EXPERT_ROUND1_PROMPT,
-    EXPERT_ROUND2_PROMPT,
-    EXPERT_ROUND3_PROMPT,
-    EXPERT_ROUND4_PROMPT,
-)
+from i18n import LANG_FOLLOW_INSTRUCTION, lang_of, t
+from skills.web_search import get_search_prompt, get_skill_prompt
+from prompts import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -178,24 +163,31 @@ class ExpertAgent(BaseMeetingAgent):
         super().__init__(name, role_label, "", provider)
         self._refresh_system_prompt()
 
-    def _refresh_system_prompt(self):
+    def _refresh_system_prompt(self, topic: str = ""):
         self.system_prompt = (
-            f"你是一位圆桌会议专家，当前在本议题中的对外头衔是 [{self.name}]，"
-            f"你的基础思考风格是 [{self.style_label}]。"
-            "请始终保持该思考风格参与讨论，提出建设性、有深度的观点，"
-            "并在表述身份时以当前对外头衔为准。"
+            t(
+                topic,
+                f"你是一位圆桌会议专家，当前在本议题中的对外头衔是 [{self.name}]，"
+                f"你的基础思考风格是 [{self.style_label}]。"
+                "请始终保持该思考风格参与讨论，提出建设性、有深度的观点，"
+                "并在表述身份时以当前对外头衔为准。",
+                f"You are an expert on a roundtable meeting. Your current public title for this topic "
+                f"is [{self.name}], and your base thinking style is [{self.style_label}]. "
+                "Always participate in the discussion in this style, offering constructive, substantive "
+                "points, and identify yourself by your current public title.",
+            )
             + LANG_FOLLOW_INSTRUCTION
         )
 
-    @property
-    def _skill_prompt(self) -> str:
+    def _skill_prompt(self, topic: str = "") -> str:
         """Return skill prompt text if search is available, empty string otherwise."""
-        return SEARCH_SKILL_PROMPT if self.search_fn else ""
+        return get_skill_prompt(topic) if self.search_fn else ""
 
     async def _speak_with_search(
-        self, prompt: str, expected_keys: list[str], round_index: int,
+        self, prompt: str, expected_keys: list[str], round_index: int, topic: str = "",
     ) -> AgentMessage:
         """Multi-step speak: LLM may search up to MAX_AGENT_SEARCHES times, then answer."""
+        lang = lang_of(topic)
         raw = await self._call_llm(prompt)
         content = safe_parse_agent_output(raw, expected_keys + ["search_query"])
 
@@ -218,7 +210,7 @@ class ExpertAgent(BaseMeetingAgent):
                 except Exception as e:
                     remaining_searches = MAX_AGENT_SEARCHES - executed_searches
                     search_history.append(
-                        SEARCH_ERROR_PROMPT.format(
+                        get_search_prompt("ERROR", topic).format(
                             query=str(search_query),
                             error=e,
                             remaining_searches=remaining_searches,
@@ -234,7 +226,7 @@ class ExpertAgent(BaseMeetingAgent):
 
                 if is_browse_request and keyword_searches == 0:
                     search_history.append(
-                        SEARCH_KEYWORD_FIRST_PROMPT.format(
+                        get_search_prompt("KEYWORD_FIRST", topic).format(
                             remaining_searches=MAX_AGENT_SEARCHES - executed_searches,
                         )
                     )
@@ -245,13 +237,13 @@ class ExpertAgent(BaseMeetingAgent):
                 if request_key in seen_requests:
                     logger.info("[%s] Round %d duplicate search skipped: '%s'", self.name, round_index, query_display)
                     search_history.append(
-                        SEARCH_DUPLICATE_PROMPT.format(
+                        get_search_prompt("DUPLICATE", topic).format(
                             query=query_display,
                             remaining_searches=remaining_searches,
                         )
                     )
                     if remaining_searches == 0:
-                        search_history.append(SEARCH_FINAL_ONLY_PROMPT)
+                        search_history.append(get_search_prompt("FINAL_ONLY", topic))
                         raw = await self._call_llm(prompt + "".join(search_history))
                         content = safe_parse_agent_output(raw, expected_keys)
                         break
@@ -265,6 +257,7 @@ class ExpertAgent(BaseMeetingAgent):
                     keyword_searches += 1
 
                 try:
+                    params["lang"] = lang
                     search_result = await self.search_fn(**params)
                     search_info.append(
                         {
@@ -284,7 +277,7 @@ class ExpertAgent(BaseMeetingAgent):
                         search_info[-1]["result_count"],
                     )
                     search_history.append(
-                        SEARCH_REFINE_PROMPT.format(
+                        get_search_prompt("REFINE", topic).format(
                             query=query_display,
                             summary=search_result.get("summary", ""),
                             search_index=executed_searches,
@@ -295,7 +288,7 @@ class ExpertAgent(BaseMeetingAgent):
                 except Exception as e:
                     logger.warning("[%s] Search failed for '%s': %s", self.name, query_display, e)
                     search_history.append(
-                        SEARCH_ERROR_PROMPT.format(
+                        get_search_prompt("ERROR", topic).format(
                             query=query_display,
                             error=e,
                             remaining_searches=remaining_searches,
@@ -303,7 +296,7 @@ class ExpertAgent(BaseMeetingAgent):
                     )
 
                 if remaining_searches == 0:
-                    search_history.append(SEARCH_FINAL_ONLY_PROMPT)
+                    search_history.append(get_search_prompt("FINAL_ONLY", topic))
                     raw = await self._call_llm(prompt + "".join(search_history))
                     content = safe_parse_agent_output(raw, expected_keys)
                     break
@@ -322,38 +315,46 @@ class ExpertAgent(BaseMeetingAgent):
             search_info=search_info or None,
         )
 
-    def retitle(self, title: str):
+    def retitle(self, title: str, topic: str = ""):
         title = title.strip()
         if not title or title == self.name:
             return
         self.name = title
-        self._refresh_system_prompt()
+        self._refresh_system_prompt(topic)
 
-    @property
-    def opening_assignment_label(self) -> str:
-        return f"{self.base_name}（{self.style_label}）"
+    def opening_assignment_label(self, topic: str = "") -> str:
+        """Base name + style label, formatted for the moderator opening prompt."""
+        return t(
+            topic,
+            f"{self.base_name}（{self.style_label}）",
+            f"{self.base_name} ({self.style_label})",
+        )
 
     async def speak_round1(self, topic: str, opening: str) -> AgentMessage:
-        prompt = EXPERT_ROUND1_PROMPT.format(
+        self._refresh_system_prompt(topic)
+        prompt = get_prompt("EXPERT_ROUND1", topic).format(
             role_label=self.role_label, topic=topic, opening=opening,
-            skill_prompt=self._skill_prompt,
+            skill_prompt=self._skill_prompt(topic),
         )
         return await self._speak_with_search(
             prompt, ["core_position", "key_points", "main_risks", "initial_suggestion"], 1,
+            topic=topic,
         )
 
     async def speak_round2(
         self, topic: str, round1_summary: str, moderator_summary: str
     ) -> AgentMessage:
-        prompt = EXPERT_ROUND2_PROMPT.format(
+        self._refresh_system_prompt(topic)
+        prompt = get_prompt("EXPERT_ROUND2", topic).format(
             role_label=self.role_label,
             topic=topic,
             round1_summary=round1_summary,
             moderator_summary=moderator_summary,
-            skill_prompt=self._skill_prompt,
+            skill_prompt=self._skill_prompt(topic),
         )
         return await self._speak_with_search(
             prompt, ["new_points", "attacks", "preserved_points"], 2,
+            topic=topic,
         )
 
     async def speak_round3(
@@ -363,36 +364,40 @@ class ExpertAgent(BaseMeetingAgent):
         moderator_summary: str,
         attacks_on_me: str,
     ) -> AgentMessage:
-        prompt = EXPERT_ROUND3_PROMPT.format(
+        self._refresh_system_prompt(topic)
+        prompt = get_prompt("EXPERT_ROUND3", topic).format(
             role_label=self.role_label,
             topic=topic,
             round2_summary=round2_summary,
             moderator_summary=moderator_summary,
             agent_name=self.name,
             attacks_on_me=attacks_on_me,
-            skill_prompt=self._skill_prompt,
+            skill_prompt=self._skill_prompt(topic),
         )
         return await self._speak_with_search(
             prompt,
             ["strongest_attack_on_me", "accepted_criticisms", "revisions",
              "final_position", "preferred_solution"],
             3,
+            topic=topic,
         )
 
     async def speak_round4(
         self, topic: str, focused_issues: str, compressed_summary: str
     ) -> AgentMessage:
-        prompt = EXPERT_ROUND4_PROMPT.format(
+        self._refresh_system_prompt(topic)
+        prompt = get_prompt("EXPERT_ROUND4", topic).format(
             role_label=self.role_label,
             topic=topic,
             focused_issues=focused_issues,
             compressed_summary=compressed_summary,
-            skill_prompt=self._skill_prompt,
+            skill_prompt=self._skill_prompt(topic),
         )
         return await self._speak_with_search(
             prompt,
             ["focused_issue", "final_addition", "last_attack_or_defense", "closing_view"],
             4,
+            topic=topic,
         )
 
 
@@ -404,23 +409,37 @@ class ModeratorAgent(BaseMeetingAgent):
         provider: LLMProviderConfig,
         name: str = "Moderator",
     ):
-        system_prompt = (
-            "你是圆桌会议的仲裁者和主持人。你的职责是引导话题、每轮做总结、"
-            "为每个专家打分，并在最终输出推荐方案。保持中立，不深度参与具体业务分析。"
+        super().__init__(name, "Arbiter", self._build_system_prompt(), provider)
+
+    def _build_system_prompt(self, topic: str = "") -> str:
+        return (
+            t(
+                topic,
+                "你是圆桌会议的仲裁者和主持人。你的职责是引导话题、每轮做总结、"
+                "为每个专家打分，并在最终输出推荐方案。保持中立，不深度参与具体业务分析。",
+                "You are the arbiter and host of a roundtable meeting. Your duties are to guide the "
+                "discussion, summarize each round, score every expert, and output a recommended "
+                "solution at the end. Stay neutral and do not dive deep into domain analysis yourself.",
+            )
             + LANG_FOLLOW_INSTRUCTION
         )
-        super().__init__(name, "仲裁者", system_prompt, provider)
+
+    def _localize(self, topic: str = ""):
+        """Refresh the system prompt and role label for the topic's language."""
+        self.system_prompt = self._build_system_prompt(topic)
+        self.role_label = t(topic, "仲裁者", "Arbiter")
 
     async def opening(self, topic: str, expert_specs: str, goal: Optional[str], constraints: list, background: Optional[str]) -> str:
-        goal_section = f"目标：{goal}" if goal else ""
+        self._localize(topic)
+        goal_section = t(topic, f"目标：{goal}", f"Goal: {goal}") if goal else ""
         constraints_section = (
-            "限制条件：\n" + "\n".join(f"- {c}" for c in constraints)
+            (t(topic, "限制条件：\n", "Constraints:\n") + "\n".join(f"- {c}" for c in constraints))
             if constraints
             else ""
         )
-        background_section = f"背景信息：{background}" if background else ""
+        background_section = t(topic, f"背景信息：{background}", f"Background: {background}") if background else ""
 
-        prompt = MODERATOR_OPENING_PROMPT.format(
+        prompt = get_prompt("MODERATOR_OPENING", topic).format(
             topic=topic,
             expert_specs=expert_specs,
             goal_section=goal_section,
@@ -436,12 +455,19 @@ class ModeratorAgent(BaseMeetingAgent):
         round_messages: str,
         previous_context: str = "",
     ) -> RoundSummary:
-        prompt = MODERATOR_SUMMARY_PROMPT.format(
+        self._localize(topic)
+        prompt = get_prompt("MODERATOR_SUMMARY", topic).format(
             round_index=round_index,
             topic=topic,
             round_messages=round_messages,
             previous_context=(
-                f"\n前面轮次的上下文：\n{previous_context}" if previous_context else ""
+                t(
+                    topic,
+                    f"\n前面轮次的上下文：\n{previous_context}",
+                    f"\nContext from previous rounds:\n{previous_context}",
+                )
+                if previous_context
+                else ""
             ),
         )
         raw = await self._call_llm(prompt)
@@ -484,7 +510,8 @@ class ModeratorAgent(BaseMeetingAgent):
         )
 
     async def finalize(self, topic: str, all_discussion: str) -> FinalReport:
-        prompt = MODERATOR_FINAL_PROMPT.format(
+        self._localize(topic)
+        prompt = get_prompt("MODERATOR_FINAL", topic).format(
             topic=topic, all_discussion=all_discussion
         )
         raw = await self._call_llm(prompt)
@@ -525,3 +552,4 @@ class ModeratorAgent(BaseMeetingAgent):
             final_scores=final_scores,
             raw_markdown=raw,
         )
+

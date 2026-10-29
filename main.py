@@ -8,7 +8,7 @@ from config import load_config
 from models import MeetingInput
 from agents import ModeratorAgent, ExpertAgent
 from meeting import RoundtableMeeting
-from i18n import t, get_default_experts, LANG_FOLLOW_INSTRUCTION
+from i18n import t, get_default_experts, LANG_FOLLOW_INSTRUCTION, lang_of
 from skills.web_search import execute as skill_web_search, is_available as skill_search_available
 
 logging.basicConfig(
@@ -95,16 +95,16 @@ async def _research_phase_cli(topic: str, background: str | None, env_path: str 
         _t = lambda zh, en: t(topic, zh, en)
         prompt = (
             f"{_t('你是圆桌会议的仲裁者。你需要为即将讨论的议题通过新闻数据库搜索背景信息。', 'You are the moderator of a roundtable meeting. You need to search a news database for background information on the upcoming topic.')}\n\n"
-            f"{_t('议题', 'Topic')}：{topic}\n"
+            f"{_t('议题：', 'Topic: ')}{topic}\n"
         )
         if background:
-            prompt += f"{_t('用户提供的背景', 'User-provided background')}：{background}\n"
+            prompt += f"{_t('用户提供的背景：', 'User-provided background: ')}{background}\n"
         if collected_info:
-            prompt += f"\n{_t('已搜集到的信息', 'Collected information so far')}：\n{''.join(collected_info[-3:])}\n"
+            prompt += f"\n{_t('已搜集到的信息：', 'Collected information so far:')}\n{''.join(collected_info[-3:])}\n"
         if searched_queries:
-            prompt += f"\n{_t('已执行过的搜索/浏览指令', 'Previously executed search/browse commands')}：{', '.join(searched_queries)}\n"
+            prompt += f"\n{_t('已执行过的搜索/浏览指令：', 'Previously executed search/browse commands: ')}{', '.join(searched_queries)}\n"
         if last_feedback:
-            prompt += f"\n{_t('上一次搜索反馈', 'Last search feedback')}：{last_feedback}\n"
+            prompt += f"\n{_t('上一次搜索反馈：', 'Last search feedback: ')}{last_feedback}\n"
         prompt += (
             f"\n{_t('请判断是否还需要搜索更多信息。本地搜索不限次数，请尽可能搜索所有你需要的信息。', 'Please decide whether more searching is needed. Local search is unlimited — search as much as you need.')}\n"
             f"{_t('如果信息已经足够充分，回复：DONE', 'If information is sufficient, reply: DONE')}\n"
@@ -159,6 +159,7 @@ async def _research_phase_cli(topic: str, background: str | None, env_path: str 
                     category=actual_category,
                     max_results=research_max_results,
                     topic="news",
+                    lang=lang_of(topic),
                 )
                 if actual_query:
                     keyword_searches += 1
@@ -168,9 +169,10 @@ async def _research_phase_cli(topic: str, background: str | None, env_path: str 
                     max_results=8,
                     search_depth="advanced",
                     topic="general",
+                    lang=lang_of(topic),
                 )
             else:
-                result = await fetch_webpage_content(actual_url or "")
+                result = await fetch_webpage_content(actual_url or "", lang=lang_of(topic))
 
             result_urls = {r.get("url", "") for r in result.get("results", []) if r.get("url")}
             new_urls = result_urls - seen_urls
@@ -451,3 +453,4 @@ def _interactive_chat(meeting_report: str, env_path: str | None = None):
 
 if __name__ == "__main__":
     main()
+

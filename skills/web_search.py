@@ -9,6 +9,7 @@ Each agent may use this skill up to five times per round to:
 import logging
 from typing import Optional
 
+from i18n import is_chinese
 from search import (
     fetch_webpage_content,
     get_search_api_url,
@@ -37,6 +38,7 @@ async def execute(
     include_domains: Optional[list[str]] = None,
     exclude_domains: Optional[list[str]] = None,
     max_chars: int = 12000,
+    lang: str = "en",
 ) -> dict:
     """Run a research operation and return results.
 
@@ -54,6 +56,7 @@ async def execute(
             days=days,
             max_results=max_results,
             topic="news",
+            lang=lang,
         )
 
     if normalized_backend == "web":
@@ -65,20 +68,24 @@ async def execute(
             include_domains=include_domains,
             exclude_domains=exclude_domains,
             days=days,
+            lang=lang,
         )
 
     if normalized_backend == "fetch":
         target_url = (url or query).strip()
-        return await fetch_webpage_content(target_url, max_chars=max_chars)
+        return await fetch_webpage_content(target_url, max_chars=max_chars, lang=lang)
 
     raise ValueError(f"Unknown research backend: {backend}")
 
 
-# Prompt instruction appended to expert prompts when search is enabled.
-# Written in Chinese to match existing prompts; LANG_FOLLOW_INSTRUCTION
-# ensures the LLM adapts to the user's language automatically.
+# Bilingual prompt instruction for the research skill, selected at runtime
+# based on the language of the meeting topic.
+# Keys: SKILL (appended to expert prompts), REFINE / DUPLICATE / KEYWORD_FIRST /
+# ERROR / FINAL_ONLY (search-loop feedback in ExpertAgent._speak_with_search).
 
-SKILL_PROMPT = """
+_PROMPTS: dict[str, tuple[str, str]] = {
+    "SKILL": (
+        """
 
 ## 可用技能：研究工具
 你拥有最多 5 次研究工具调用机会。研究工具分为三类：
@@ -132,10 +139,65 @@ SKILL_PROMPT = """
 - 本地新闻默认返回 20 条，开放网页搜索默认建议 8 条
 - 如果信息足够，就直接输出最终回答，不要再添加 search_query
 - 如果不需要搜索，**不要**添加该字段
-"""
+""",
+        """
 
+## Available skill: research tools
+You have up to 5 research tool calls available. The research tools come in three types:
 
-SEARCH_REFINE_PROMPT = """
+1. Local news database (backend="local")
+   Best for: finance news from the last 1-3 days, market moves, policy news, industry briefs.
+
+2. Open-web search (backend="web")
+   Best for: Eastmoney, Xueqiu, Sina Finance, company announcements, broker research reports, fundamentals, supply-chain analysis.
+
+3. Webpage fetch (backend="fetch")
+   Best for: when you have already found a high-value URL via web search and need to read the page body.
+
+If you need to look up the latest material to support an argument, verify a fact, or rebut someone's point, add an extra "search_query" field to your JSON output.
+You can return a string or a JSON object:
+
+1. Local news keyword (string, default backend=local):
+"search_query": "tariff"
+
+2. Local news browse (object):
+"search_query": {
+    "backend": "local",
+    "query": "",
+    "category": "china_finance",
+    "days": 3,
+    "max_results": 20
+}
+
+3. Open-web search (object):
+"search_query": {
+    "backend": "web",
+    "query": "Pengding Holdings Shiyun Circuit Eastmoney March 2026",
+    "include_domains": ["eastmoney.com", "sina.com.cn", "xueqiu.com"],
+    "max_results": 8
+}
+
+4. Webpage fetch (object):
+"search_query": {
+    "backend": "fetch",
+    "url": "https://caifuhao.eastmoney.com/news/..."
+}
+
+Rules:
+- At most 5 research tool calls per round
+- Do keyword search first by default; do not start with ALL or an empty query to browse local news
+- The local-news query must be a single word; the open-web query can be a natural-language phrase
+- Prefer backend="web" or backend="fetch" for stock investment value, company announcements, financial metrics, broker ratings, or Eastmoney/Xueqiu pages
+- Use local browse mode (ALL or query="") only when local keywords return nothing or you need the full market picture
+- If you already have a high-value webpage URL, do not keep broad-searching — fetch the page body directly with backend="fetch"
+- If browsing a category or fetching a URL yields no new information, do not repeat the same parameters
+- Local news returns 20 items by default; open-web search is suggested at 8
+- If the information is sufficient, output your final answer directly and do not add search_query
+- If no search is needed, do NOT add the field
+""",
+    ),
+    "REFINE": (
+        """
 --- 第 {search_index}/{max_searches} 次搜索结果 ---
 你之前请求搜索了「{query}」，以下是搜索到的信息：
 
@@ -146,33 +208,85 @@ SEARCH_REFINE_PROMPT = """
 - 如果还缺关键信息，你仍可继续添加新的 search_query。
 - 剩余搜索次数：{remaining_searches}
 - 不要重复已经搜索过的 query/category/source 组合。
-"""
+""",
+        """
+--- Search results {search_index}/{max_searches} ---
+You previously asked to search for "{query}". Here is what was found:
 
+{summary}
 
-SEARCH_DUPLICATE_PROMPT = """
+Based on the search results above, combined with your professional judgment and prior analysis, continue your answer.
+- If the information is already sufficient, output your complete final answer directly and do not add a search_query field.
+- If key information is still missing, you may continue adding new search_query values.
+- Remaining searches: {remaining_searches}
+- Do not repeat query/category/source combinations you have already searched.
+""",
+    ),
+    "DUPLICATE": (
+        """
 --- 搜索提醒 ---
 你刚才重复请求了「{query}」，系统不会再次执行相同搜索。
 如果还需要补充信息，请换一个新的 query/category/source；否则直接输出最终回答。
 剩余搜索次数：{remaining_searches}
-"""
-
-
-SEARCH_KEYWORD_FIRST_PROMPT = """
+""",
+        """
+--- Search reminder ---
+You just requested "{query}" again. The system will not run the same search a second time.
+If you still need to fill gaps, use a new query/category/source; otherwise output your final answer directly.
+Remaining searches: {remaining_searches}
+""",
+    ),
+    "KEYWORD_FIRST": (
+        """
 --- 搜索提醒 ---
 本轮请先做至少一次关键词搜索，不要一开始就使用 ALL 或空 query 浏览。
 请先给出一个单词关键词；如果关键词没有结果，再改用浏览模式。
 剩余搜索次数：{remaining_searches}
-"""
-
-
-SEARCH_ERROR_PROMPT = """
+""",
+        """
+--- Search reminder ---
+In this round, please do at least one keyword search first; do not start with ALL or an empty query to browse.
+Give a single-word keyword first; if the keyword returns nothing, switch to browse mode.
+Remaining searches: {remaining_searches}
+""",
+    ),
+    "ERROR": (
+        """
 --- 搜索失败 ---
 你请求的搜索「{query}」执行失败：{error}
 如果还需要补充信息，请换一个新的 query/category/source；否则直接输出最终回答。
 剩余搜索次数：{remaining_searches}
-"""
-
-
-SEARCH_FINAL_ONLY_PROMPT = """
+""",
+        """
+--- Search failed ---
+Your search for "{query}" failed: {error}
+If you still need to fill gaps, use a new query/category/source; otherwise output your final answer directly.
+Remaining searches: {remaining_searches}
+""",
+    ),
+    "FINAL_ONLY": (
+        """
 你已经用完本轮的搜索次数。现在必须基于已有搜索结果直接输出最终回答，不要再添加 search_query 字段。
-"""
+""",
+        """
+You have used up all search calls for this round. You must now output your final answer directly based on the results you already have, and do not add a search_query field.
+""",
+    ),
+}
+
+
+def get_prompt(name: str, topic: str = "") -> str:
+    """Return the research-skill prompt for *name* in the language of *topic*."""
+    zh, en = _PROMPTS[name]
+    return zh if is_chinese(topic) else en
+
+
+def get_skill_prompt(topic: str = "") -> str:
+    """Return the skill prompt text in the language of *topic*."""
+    return get_prompt("SKILL", topic)
+
+
+def get_search_prompt(name: str, topic: str = "") -> str:
+    """Return a search-loop feedback prompt in the language of *topic*."""
+    return get_prompt(name, topic)
+

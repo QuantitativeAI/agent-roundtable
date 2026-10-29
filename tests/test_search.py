@@ -90,7 +90,7 @@ async def test_tavily_search_returns_zero_results_when_local_search_has_no_hits(
     result = await search.tavily_search(query="A股", max_results=5, topic="news")
 
     assert result["result_count"] == 0
-    assert "搜索结果 (共 0 条)" in result["summary"]
+    assert "Search Results (0 total)" in result["summary"]
 
 
 def test_parse_local_news_command_supports_recent_modes():

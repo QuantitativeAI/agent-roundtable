@@ -314,8 +314,9 @@ async def _research_phase(
     if collected_info:
         await send_event({"type": "system", "content": t(topic, f"🔍 搜索完成，共进行了 {len(searched_queries)} 次搜索。开始圆桌会议...", f"🔍 Search complete ({len(searched_queries)} searches). Starting roundtable meeting...")})
     else:
-        await send_event({"type": "system", "content": t(topic, "🔍 未搜集到有效信息，直接开始圆桌会议...", "🔍 No useful information found, starting roundtable meeting directly...")})
+        await send_event({"type": "system", "content": t(topic, "🔍 未搜集到有效信息，直接开始圆桌会议...", f"🔍 No useful information found, starting roundtable meeting directly...")})
 
+    await moderator_client.close()
     return "\n\n".join(collected_info)
 
 
@@ -328,6 +329,7 @@ async def _run_meeting_task(
     search_enabled: bool,
     send_event,
 ):
+    agents: list = []
     try:
         config = _get_runtime_config()
 
@@ -364,6 +366,8 @@ async def _run_meeting_task(
             for expert in experts:
                 expert.search_fn = skill_web_search
 
+        agents = [moderator, *experts]
+
         meeting = StreamingMeeting(
             moderator=moderator,
             experts=experts,
@@ -389,6 +393,10 @@ async def _run_meeting_task(
         await send_event({"type": "meeting_end", "content": t(topic, "会议异常结束。", "Meeting ended abnormally.")})
     finally:
         _active_meetings.pop(session_id, None)
+        # Release all LLM clients so the (local) model server can unload the
+        # model and the process doesn't leak HTTP connection pools.
+        for agent in agents:
+            await agent.close()
 
 
 # Per-session chat history for post-meeting follow-up
@@ -402,6 +410,7 @@ async def _chat_with_moderator(
     send_event,
 ):
     """After a meeting ends, let the moderator chat with the user based on meeting history."""
+    client = None
     try:
         config = _get_runtime_config()
         client = AsyncOpenAI(
@@ -452,6 +461,9 @@ async def _chat_with_moderator(
     except Exception as e:
         logger.exception("Chat with moderator failed for session %s", session_id)
         await send_event({"type": "error", "content": t(user_message, f"对话出错: {e}", f"Chat error: {e}")})
+    finally:
+        if client is not None:
+            await client.close()
 
 
 if __name__ == "__main__":

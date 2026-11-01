@@ -109,6 +109,22 @@ class BaseMeetingAgent:
         self.provider = provider
         self.client = create_client(provider)
         self.model = provider.model
+        self._closed = False
+
+    async def close(self) -> None:
+        """Close the underlying async LLM client, releasing pooled connections.
+
+        Call this when the agent is done (e.g. at the end of a meeting). Without
+        it the HTTP connection pool stays open, which keeps a local model server
+        holding the model in memory after the session has finished.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self.client.close()
+        except Exception as e:
+            logger.debug("[%s] Error closing LLM client: %s", self.name, e)
 
     async def _call_llm(self, user_prompt: str) -> str:
         """Call the LLM and return the raw text response."""
